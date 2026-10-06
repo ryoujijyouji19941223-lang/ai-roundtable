@@ -19,6 +19,10 @@ const stats = Object.fromEntries(AI_IDS.map((id) => [id, {
   remaining: INITIAL_BUDGET,
   decisionTokens: 0,
   speechTokens: 0,
+  decisionUsdMin: 0,
+  decisionUsdMax: 0,
+  speechUsdMin: 0,
+  speechUsdMax: 0,
   spoken: 0,
   passed: 0,
   raised: 0,
@@ -66,6 +70,27 @@ function renderTranscript() {
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
 
+function formatUsd(value) {
+  const n = Math.max(0, Number(value) || 0);
+  if (n > 0 && n < 0.000001) return "<$0.000001";
+  return "$" + n.toFixed(6);
+}
+
+function renderCostSummary() {
+  let min = 0;
+  let max = 0;
+  for (const id of AI_IDS) {
+    const s = stats[id];
+    min += s.decisionUsdMin + s.speechUsdMin;
+    max += s.decisionUsdMax + s.speechUsdMax;
+  }
+  const el = document.querySelector("#costSummary");
+  if (!el) return;
+  el.textContent = min === max
+    ? "API標準単価換算 累計 " + formatUsd(max)
+    : "API標準単価換算 累計 " + formatUsd(min) + " ～ " + formatUsd(max) + "（Gemini無料枠/有料枠）";
+}
+
 function renderStats() {
   for (const id of AI_IDS) {
     const s = stats[id];
@@ -83,7 +108,17 @@ function renderStats() {
 
     document.querySelector("#count-" + key).textContent =
       "発言 " + s.spoken + "回 / 見送り " + s.passed + "回";
+
+    const minUsd = s.decisionUsdMin + s.speechUsdMin;
+    const maxUsd = s.decisionUsdMax + s.speechUsdMax;
+    const costEl = document.querySelector("#cost-" + key);
+    if (costEl) {
+      costEl.textContent = minUsd === maxUsd
+        ? "API推定 " + formatUsd(maxUsd)
+        : "API推定 " + formatUsd(minUsd) + " ～ " + formatUsd(maxUsd);
+    }
   }
+  renderCostSummary();
 }
 
 function setParticipantState(id, label, kind = "") {
@@ -148,8 +183,11 @@ async function requestDecision(id) {
   if (!res.ok) throw new Error(data.error || "Decision request failed");
 
   const cost = Number(data.tokenCost) || 0;
+  const apiCost = data.apiCost || {};
   stats[id].remaining -= cost;
   stats[id].decisionTokens += cost;
+  stats[id].decisionUsdMin += Number(apiCost.minUsd) || 0;
+  stats[id].decisionUsdMax += Number(apiCost.maxUsd) || 0;
   stats[id].lastDecision = data.decision;
 
   const d = data.decision || { action: "pass", urgency: 0, target: null, reason: "" };
@@ -166,6 +204,8 @@ async function requestDecision(id) {
     " / urgency=" + Math.round(d.urgency || 0) +
     (d.target ? " / target=" + d.target : "") +
     " / 判断消費=" + cost +
+    " / API=" + formatUsd(apiCost.minUsd) +
+    (Number(apiCost.maxUsd || 0) !== Number(apiCost.minUsd || 0) ? "～" + formatUsd(apiCost.maxUsd) : "") +
     (d.reason ? " / 理由: " + d.reason : "")
   );
 
@@ -190,8 +230,11 @@ async function requestSpeech(id) {
   if (!res.ok) throw new Error(data.error || "Speech request failed");
 
   const cost = Number(data.tokenCost) || 0;
+  const apiCost = data.apiCost || {};
   stats[id].remaining -= cost;
   stats[id].speechTokens += cost;
+  stats[id].speechUsdMin += Number(apiCost.minUsd) || 0;
+  stats[id].speechUsdMax += Number(apiCost.maxUsd) || 0;
   stats[id].spoken += 1;
 
   messages.push({
@@ -199,7 +242,11 @@ async function requestSpeech(id) {
     text: data.text || "(発言なし)"
   });
 
-  addObserverLog(id + " 発言 / 発言消費=" + cost);
+  addObserverLog(
+    id + " 発言 / 発言消費=" + cost +
+    " / API=" + formatUsd(apiCost.minUsd) +
+    (Number(apiCost.maxUsd || 0) !== Number(apiCost.minUsd || 0) ? "～" + formatUsd(apiCost.maxUsd) : "")
+  );
   setParticipantState(id, stats[id].remaining > 0 ? "待機" : "予算終了", stats[id].remaining > 0 ? "" : "exhausted");
 
   renderTranscript();
