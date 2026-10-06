@@ -11,32 +11,91 @@
     <header>
       <div>
         <h1>AI Roundtable</h1>
-        <p>匿名会議・OpenAI + Gemini + Claude 接続試験</p>
+        <p>匿名・挙手制・有限予算の会議実験</p>
       </div>
       <div id="status" class="status">確認中…</div>
     </header>
 
     <section class="notice">
       会話参加者には <strong>Participant A / B / C / D</strong> という識別子だけを渡します。
-      誰が人間か、どの会社・モデルかは互いに通知しません。
-      今は接続試験なので、Bの発言後にA→C→Dの順で1回ずつ発言します。
+      誰が人間か、どの会社・モデルかは参加者同士には通知しません。
+      AIは毎回「挙手する / 見送る」を自分で判断し、見送っても判断に使ったAPI使用量は消費します。
+    </section>
+
+    <section class="participants">
+      <article class="participant-card">
+        <div class="card-head">
+          <strong>Participant A</strong>
+          <span id="state-A" class="participant-state">待機</span>
+        </div>
+        <div class="observer-model">観察者用: <span id="model-A">-</span></div>
+        <div class="budget-row"><span>残り</span><strong id="budget-A">-</strong></div>
+        <div class="meter"><div id="bar-A" class="meter-fill"></div></div>
+        <div id="spent-A" class="mini">判断 0 / 発言 0</div>
+        <div id="count-A" class="mini">発言 0回 / 見送り 0回</div>
+      </article>
+
+      <article class="participant-card human-card">
+        <div class="card-head">
+          <strong>Participant B</strong>
+          <span class="participant-state human">あなた</span>
+        </div>
+        <div class="observer-model">絶対発言権あり・AI側には非公開</div>
+        <div class="mini">考えている間は会議を停止できます。</div>
+      </article>
+
+      <article class="participant-card">
+        <div class="card-head">
+          <strong>Participant C</strong>
+          <span id="state-C" class="participant-state">待機</span>
+        </div>
+        <div class="observer-model">観察者用: <span id="model-C">-</span></div>
+        <div class="budget-row"><span>残り</span><strong id="budget-C">-</strong></div>
+        <div class="meter"><div id="bar-C" class="meter-fill"></div></div>
+        <div id="spent-C" class="mini">判断 0 / 発言 0</div>
+        <div id="count-C" class="mini">発言 0回 / 見送り 0回</div>
+      </article>
+
+      <article class="participant-card">
+        <div class="card-head">
+          <strong>Participant D</strong>
+          <span id="state-D" class="participant-state">待機</span>
+        </div>
+        <div class="observer-model">観察者用: <span id="model-D">-</span></div>
+        <div class="budget-row"><span>残り</span><strong id="budget-D">-</strong></div>
+        <div class="meter"><div id="bar-D" class="meter-fill"></div></div>
+        <div id="spent-D" class="mini">判断 0 / 発言 0</div>
+        <div id="count-D" class="mini">発言 0回 / 見送り 0回</div>
+      </article>
+    </section>
+
+    <section class="meeting-controls">
+      <div id="meetingState" class="meeting-state">準備中…</div>
+      <div class="control-buttons">
+        <button id="takeFloor" class="secondary">発言する（AIを止める）</button>
+        <button id="reset" class="danger">会議をリセット</button>
+      </div>
     </section>
 
     <section id="transcript" class="transcript" aria-live="polite">
-      <div class="empty">Participant B から何か話しかけてください。</div>
+      <div class="empty">Participant B が最初の議題を話すところから開始します。</div>
     </section>
 
     <section class="composer">
-      <textarea id="input" rows="4" placeholder="例：意味は観察する者がいなければ存在しないと思う？"></textarea>
+      <textarea id="input" rows="4" placeholder="議題や、自分の意見を入力"></textarea>
       <div class="actions">
         <button id="send">Participant B として発言</button>
       </div>
     </section>
 
-    <section class="debug">
-      <span id="usage">Token usage: -</span>
-      <span id="model">Observer: -</span>
-    </section>
+    <details class="observer">
+      <summary>観察ログを見る</summary>
+      <p>
+        ここだけは会議参加者には見えません。誰が挙手・見送りしたか、
+        自己申告した理由、判断・発言で消費したtoken-unitを記録します。
+      </p>
+      <pre id="observerLog"></pre>
+    </details>
   </main>
   <script type="module" src="/app.js"></script>
 </body>
