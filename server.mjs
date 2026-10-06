@@ -90,6 +90,74 @@ function tokenCost(provider, usage) {
   return 0;
 }
 
+function estimateApiCost(provider, usage) {
+  const perMillion = (tokens, dollars) => (Number(tokens) || 0) * dollars / 1_000_000;
+
+  if (!usage) {
+    return { usd: 0, minUsd: 0, maxUsd: 0, pricingMode: "unknown", breakdown: {} };
+  }
+
+  if (provider === "openai") {
+    const input = Number(usage.input_tokens || 0);
+    const output = Number(usage.output_tokens || 0);
+    const details = usage.input_tokens_details || {};
+    const cached = Number(details.cached_tokens || 0);
+    const cacheWrite = Number(details.cache_write_tokens || details.cache_creation_tokens || 0);
+    const uncached = Math.max(0, input - cached - cacheWrite);
+
+    const usd =
+      perMillion(uncached, 0.10) +
+      perMillion(cached, 0.01) +
+      perMillion(cacheWrite, 0.125) +
+      perMillion(output, 0.50);
+
+    return {
+      usd,
+      minUsd: usd,
+      maxUsd: usd,
+      pricingMode: "standard-estimate",
+      breakdown: { input: uncached, cachedInput: cached, cacheWrite, output }
+    };
+  }
+
+  if (provider === "gemini") {
+    const input = Number(usage.promptTokenCount || 0);
+    const output = Number(usage.candidatesTokenCount || 0) + Number(usage.thoughtsTokenCount || 0);
+    const paidUsd = perMillion(input, 0.75) + perMillion(output, 3.75);
+
+    return {
+      usd: paidUsd,
+      minUsd: 0,
+      maxUsd: paidUsd,
+      pricingMode: "free-or-paid",
+      breakdown: { input, output }
+    };
+  }
+
+  if (provider === "claude") {
+    const input = Number(usage.input_tokens || 0);
+    const output = Number(usage.output_tokens || 0);
+    const cacheWrite = Number(usage.cache_creation_input_tokens || 0);
+    const cacheRead = Number(usage.cache_read_input_tokens || 0);
+
+    const usd =
+      perMillion(input, 2.00) +
+      perMillion(cacheWrite, 2.50) +
+      perMillion(cacheRead, 0.20) +
+      perMillion(output, 10.00);
+
+    return {
+      usd,
+      minUsd: usd,
+      maxUsd: usd,
+      pricingMode: "standard-estimate",
+      breakdown: { input, cacheWrite, cacheRead, output }
+    };
+  }
+
+  return { usd: 0, minUsd: 0, maxUsd: 0, pricingMode: "unknown", breakdown: {} };
+}
+
 function commonInstructions(participantId, budget) {
   return [
     "You are " + participantId + " in an anonymous roundtable.",
@@ -272,12 +340,14 @@ async function callParticipant(participantId, mode, transcript, budget) {
   if (config.provider === "claude") result = await callClaude(instructions, prompt, maxOutput);
 
   const cost = tokenCost(config.provider, result.usage);
+  const apiCost = estimateApiCost(config.provider, result.usage);
 
   if (mode === "decide") {
     return {
       participant: participantId,
       decision: parseDecision(result.text),
       tokenCost: cost,
+      apiCost,
       usage: result.usage,
       model: result.model
     };
@@ -287,6 +357,7 @@ async function callParticipant(participantId, mode, transcript, budget) {
     participant: participantId,
     text: result.text,
     tokenCost: cost,
+    apiCost,
     usage: result.usage,
     model: result.model
   };
