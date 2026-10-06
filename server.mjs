@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const PORT = Number(process.env.PORT || 3000);
 const HOST = "127.0.0.1";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-6-luna";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";\nconst CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5-5";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 const publicDir = join(root, "public");
@@ -53,6 +53,14 @@ function extractOpenAIText(data) {
 function extractGeminiText(data) {
   return (data?.candidates?.[0]?.content?.parts || [])
     .map((part) => typeof part.text === "string" ? part.text : "")
+    .join("")
+    .trim();
+}
+
+function extractClaudeText(data) {
+  return (data?.content || [])
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
     .join("")
     .trim();
 }
@@ -169,6 +177,54 @@ async function callGemini(transcript) {
   };
 }
 
+async function callClaude(transcript) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not available to this process.");
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 600,
+      system: anonymousInstructions("Participant D"),
+      messages: [{
+        role: "user",
+        content: [
+          "Anonymous roundtable transcript:",
+          "",
+          transcript,
+          "",
+          "Make one contribution as Participant D."
+        ].join("\n")
+      }],
+      output_config: {
+        effort: "low"
+      }
+    })
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    const message = data?.error?.message || `Claude API error: HTTP ${response.status}`;
+    const err = new Error(message);
+    err.status = response.status;
+    throw err;
+  }
+
+  return {
+    participant: "Participant D",
+    text: extractClaudeText(data),
+    provider: "Anthropic",
+    model: data.model || CLAUDE_MODEL,
+    usage: data.usage || null
+  };
+}
+
 async function serveStatic(req, res) {
   const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
   const relative = pathname === "/" ? "index.html" : pathname.replace(/^\//, "");
@@ -200,8 +256,10 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         openaiKeyConfigured: Boolean(process.env.OPENAI_API_KEY),
         geminiKeyConfigured: Boolean(process.env.GEMINI_API_KEY),
+        anthropicKeyConfigured: Boolean(process.env.ANTHROPIC_API_KEY),
         openaiModel: OPENAI_MODEL,
-        geminiModel: GEMINI_MODEL
+        geminiModel: GEMINI_MODEL,
+        claudeModel: CLAUDE_MODEL
       });
       return;
     }
@@ -226,6 +284,16 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && req.url === "/api/anthropic/respond") {
+      const body = await readJson(req);
+      if (!Array.isArray(body.messages) || body.messages.length === 0) {
+        sendJson(res, 400, { error: "messages must be a non-empty array" });
+        return;
+      }
+      sendJson(res, 200, await callClaude(makeTranscript(body.messages)));
+      return;
+    }
+
     if (req.method === "GET") {
       await serveStatic(req, res);
       return;
@@ -244,6 +312,8 @@ server.listen(PORT, HOST, () => {
   console.log(`AI Roundtable: http://${HOST}:${PORT}`);
   console.log(`OpenAI model: ${OPENAI_MODEL}`);
   console.log(`Gemini model: ${GEMINI_MODEL}`);
+  console.log(`Claude model: ${CLAUDE_MODEL}`);
   console.log(`OPENAI_API_KEY configured: ${Boolean(process.env.OPENAI_API_KEY)}`);
   console.log(`GEMINI_API_KEY configured: ${Boolean(process.env.GEMINI_API_KEY)}`);
+  console.log(`ANTHROPIC_API_KEY configured: ${Boolean(process.env.ANTHROPIC_API_KEY)}`);
 });
