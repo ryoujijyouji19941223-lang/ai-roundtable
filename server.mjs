@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 const PORT = Number(process.env.PORT || 3000);
 const HOST = "127.0.0.1";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-6-luna";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";\nconst CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5-5";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5-5";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 const publicDir = join(root, "public");
