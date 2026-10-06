@@ -47,9 +47,10 @@ async function health() {
     const data = await res.json();
     const openai = data.openaiKeyConfigured ? "OpenAI OK" : "OpenAI 未検出";
     const gemini = data.geminiKeyConfigured ? "Gemini OK" : "Gemini 未検出";
-    statusEl.textContent = `${openai} / ${gemini}`;
-    statusEl.dataset.ok = data.openaiKeyConfigured && data.geminiKeyConfigured ? "1" : "0";
-    modelEl.textContent = `Observer: A=${data.openaiModel || "-"} / C=${data.geminiModel || "-"}`;
+    const claude = data.anthropicKeyConfigured ? "Claude OK" : "Claude 未検出";
+    statusEl.textContent = `${openai} / ${gemini} / ${claude}`;
+    statusEl.dataset.ok = data.openaiKeyConfigured && data.geminiKeyConfigured && data.anthropicKeyConfigured ? "1" : "0";
+    modelEl.textContent = `Observer: A=${data.openaiModel || "-"} / C=${data.geminiModel || "-"} / D=${data.claudeModel || "-"}`;
   } catch {
     statusEl.textContent = "サーバー確認失敗";
   }
@@ -71,16 +72,20 @@ async function callParticipant(endpoint) {
   return data;
 }
 
-function usageText(openaiData, geminiData) {
+function usageText(openaiData, geminiData, claudeData) {
   const o = openaiData?.usage;
   const g = geminiData?.usage;
+  const d = claudeData?.usage;
   const oText = o
     ? `A: in ${o.input_tokens ?? "?"} / out ${o.output_tokens ?? "?"}`
     : "A: -";
   const gText = g
     ? `C: in ${g.promptTokenCount ?? "?"} / out ${g.candidatesTokenCount ?? "?"}`
     : "C: -";
-  return `Token usage — ${oText} | ${gText}`;
+  const dText = d
+    ? `D: in ${d.input_tokens ?? "?"} / out ${d.output_tokens ?? "?"}`
+    : "D: -";
+  return `Token usage — ${oText} | ${gText} | ${dText}`;
 }
 
 async function send() {
@@ -94,6 +99,7 @@ async function send() {
   sendEl.disabled = true;
   let openaiData = null;
   let geminiData = null;
+  let claudeData = null;
 
   try {
     sendEl.textContent = "Participant A が考えています…";
@@ -110,7 +116,14 @@ async function send() {
       addSystemError("Participant C", error);
     }
 
-    usageEl.textContent = usageText(openaiData, geminiData);
+    sendEl.textContent = "Participant D が考えています…";
+    try {
+      claudeData = await callParticipant("/api/anthropic/respond");
+    } catch (error) {
+      addSystemError("Participant D", error);
+    }
+
+    usageEl.textContent = usageText(openaiData, geminiData, claudeData);
   } finally {
     sendEl.disabled = false;
     sendEl.textContent = "Participant B として発言";
