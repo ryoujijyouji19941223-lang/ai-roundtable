@@ -29,6 +29,7 @@ header p { margin: 4px 0 0; color: #8b949e; }
 
 .status,
 .notice,
+.cost-summary,
 .meeting-controls,
 .observer,
 .participant-card {
@@ -101,6 +102,30 @@ header p { margin: 4px 0 0; color: #8b949e; }
 
 .budget-row {
   margin-top: 10px;
+  font-size: 12px;
+}
+
+.api-cost {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid #30363d;
+  font-size: 12px;
+  font-weight: 700;
+  color: #c9d1d9;
+}
+
+.cost-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+}
+
+.cost-summary span {
+  color: #8b949e;
   font-size: 12px;
 }
 
