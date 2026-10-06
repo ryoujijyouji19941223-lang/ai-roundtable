@@ -33,16 +33,54 @@ function render() {
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
 
+function addSystemError(label, error) {
+  messages.push({
+    participant: "SYSTEM",
+    text: `${label} 接続エラー: ${error.message}`
+  });
+  render();
+}
+
 async function health() {
   try {
     const res = await fetch("/api/health");
     const data = await res.json();
-    statusEl.textContent = data.openaiKeyConfigured ? "OpenAI 接続準備OK" : "APIキー未検出";
-    statusEl.dataset.ok = data.openaiKeyConfigured ? "1" : "0";
-    modelEl.textContent = `Model: ${data.model || "-"}`;
+    const openai = data.openaiKeyConfigured ? "OpenAI OK" : "OpenAI 未検出";
+    const gemini = data.geminiKeyConfigured ? "Gemini OK" : "Gemini 未検出";
+    statusEl.textContent = `${openai} / ${gemini}`;
+    statusEl.dataset.ok = data.openaiKeyConfigured && data.geminiKeyConfigured ? "1" : "0";
+    modelEl.textContent = `Observer: A=${data.openaiModel || "-"} / C=${data.geminiModel || "-"}`;
   } catch {
     statusEl.textContent = "サーバー確認失敗";
   }
+}
+
+async function callParticipant(endpoint) {
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Request failed");
+  messages.push({
+    participant: data.participant,
+    text: data.text || "(返答テキストなし)"
+  });
+  render();
+  return data;
+}
+
+function usageText(openaiData, geminiData) {
+  const o = openaiData?.usage;
+  const g = geminiData?.usage;
+  const oText = o
+    ? `A: in ${o.input_tokens ?? "?"} / out ${o.output_tokens ?? "?"}`
+    : "A: -";
+  const gText = g
+    ? `C: in ${g.promptTokenCount ?? "?"} / out ${g.candidatesTokenCount ?? "?"}`
+    : "C: -";
+  return `Token usage — ${oText} | ${gText}`;
 }
 
 async function send() {
@@ -54,35 +92,25 @@ async function send() {
   render();
 
   sendEl.disabled = true;
-  sendEl.textContent = "Participant A が考えています…";
+  let openaiData = null;
+  let geminiData = null;
 
   try {
-    const res = await fetch("/api/openai/respond", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages })
-    });
+    sendEl.textContent = "Participant A が考えています…";
+    try {
+      openaiData = await callParticipant("/api/openai/respond");
+    } catch (error) {
+      addSystemError("Participant A", error);
+    }
 
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Request failed");
+    sendEl.textContent = "Participant C が考えています…";
+    try {
+      geminiData = await callParticipant("/api/gemini/respond");
+    } catch (error) {
+      addSystemError("Participant C", error);
+    }
 
-    messages.push({
-      participant: "Participant A",
-      text: data.text || "(返答テキストなし)"
-    });
-    render();
-
-    const u = data.usage;
-    usageEl.textContent = u
-      ? `Token usage: input ${u.input_tokens ?? "?"} / output ${u.output_tokens ?? "?"} / total ${u.total_tokens ?? "?"}`
-      : "Token usage: -";
-    modelEl.textContent = `Model: ${data.model || "-"}`;
-  } catch (error) {
-    messages.push({
-      participant: "SYSTEM",
-      text: `接続エラー: ${error.message}`
-    });
-    render();
+    usageEl.textContent = usageText(openaiData, geminiData);
   } finally {
     sendEl.disabled = false;
     sendEl.textContent = "Participant B として発言";
