@@ -1,16 +1,49 @@
+const AI_IDS = ["Participant A", "Participant C", "Participant D"];
+const HUMAN_ID = "Participant B";
+const INITIAL_BUDGET = 12000;
+const MAX_AI_CHAIN = 10;
+
 const transcriptEl = document.querySelector("#transcript");
 const inputEl = document.querySelector("#input");
 const sendEl = document.querySelector("#send");
+const takeFloorEl = document.querySelector("#takeFloor");
+const resetEl = document.querySelector("#reset");
 const statusEl = document.querySelector("#status");
-const usageEl = document.querySelector("#usage");
-const modelEl = document.querySelector("#model");
+const meetingStateEl = document.querySelector("#meetingState");
+const observerLogEl = document.querySelector("#observerLog");
 
 const messages = [];
+const observerEntries = [];
+const stats = Object.fromEntries(AI_IDS.map((id) => [id, {
+  initial: INITIAL_BUDGET,
+  remaining: INITIAL_BUDGET,
+  decisionTokens: 0,
+  speechTokens: 0,
+  spoken: 0,
+  passed: 0,
+  raised: 0,
+  lastDecision: null
+}]));
 
-function render() {
+let running = false;
+let humanWantsFloor = false;
+let fairIndex = 0;
+let aiChain = 0;
+
+function shortId(id) {
+  return id.replace("Participant ", "");
+}
+
+function addObserverLog(text) {
+  observerEntries.unshift(new Date().toLocaleTimeString() + "  " + text);
+  observerEntries.splice(80);
+  observerLogEl.textContent = observerEntries.join("\n");
+}
+
+function renderTranscript() {
   transcriptEl.innerHTML = "";
   if (messages.length === 0) {
-    transcriptEl.innerHTML = '<div class="empty">Participant B から何か話しかけてください。</div>';
+    transcriptEl.innerHTML = '<div class="empty">Participant B が最初の議題を話すところから開始します。</div>';
     return;
   }
 
@@ -33,108 +66,271 @@ function render() {
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
 
-function addSystemError(label, error) {
-  messages.push({
-    participant: "SYSTEM",
-    text: `${label} 接続エラー: ${error.message}`
-  });
-  render();
+function renderStats() {
+  for (const id of AI_IDS) {
+    const s = stats[id];
+    const key = shortId(id);
+    const remaining = Math.max(0, Math.round(s.remaining));
+    const pct = Math.max(0, Math.min(100, (remaining / s.initial) * 100));
+
+    document.querySelector("#budget-" + key).textContent =
+      remaining.toLocaleString() + " / " + s.initial.toLocaleString();
+
+    document.querySelector("#bar-" + key).style.width = pct + "%";
+    document.querySelector("#spent-" + key).textContent =
+      "判断 " + Math.round(s.decisionTokens).toLocaleString() +
+      " / 発言 " + Math.round(s.speechTokens).toLocaleString();
+
+    document.querySelector("#count-" + key).textContent =
+      "発言 " + s.spoken + "回 / 見送り " + s.passed + "回";
+  }
+}
+
+function setParticipantState(id, label, kind = "") {
+  const el = document.querySelector("#state-" + shortId(id));
+  el.textContent = label;
+  el.className = "participant-state " + kind;
+}
+
+function setHumanFloor(enabled, message) {
+  running = !enabled;
+  inputEl.disabled = !enabled;
+  sendEl.disabled = !enabled;
+  takeFloorEl.disabled = enabled;
+  takeFloorEl.textContent = enabled ? "あなたが発言できます" : "発言する（AIを止める）";
+  meetingStateEl.textContent = message;
+  if (enabled) inputEl.focus();
+}
+
+function budgetFor(id) {
+  return {
+    initial: stats[id].initial,
+    remaining: Math.max(0, stats[id].remaining)
+  };
 }
 
 async function health() {
   try {
     const res = await fetch("/api/health");
     const data = await res.json();
-    const openai = data.openaiKeyConfigured ? "OpenAI OK" : "OpenAI 未検出";
-    const gemini = data.geminiKeyConfigured ? "Gemini OK" : "Gemini 未検出";
-    const claude = data.anthropicKeyConfigured ? "Claude OK" : "Claude 未検出";
-    statusEl.textContent = `${openai} / ${gemini} / ${claude}`;
-    statusEl.dataset.ok = data.openaiKeyConfigured && data.geminiKeyConfigured && data.anthropicKeyConfigured ? "1" : "0";
-    modelEl.textContent = `Observer: A=${data.openaiModel || "-"} / C=${data.geminiModel || "-"} / D=${data.claudeModel || "-"}`;
+    const all =
+      data.openaiKeyConfigured &&
+      data.geminiKeyConfigured &&
+      data.anthropicKeyConfigured;
+
+    statusEl.textContent = all ? "3 AI 接続OK" : "APIキーを確認";
+    statusEl.dataset.ok = all ? "1" : "0";
+
+    if (data.participants) {
+      document.querySelector("#model-A").textContent = data.participants["Participant A"] || "-";
+      document.querySelector("#model-C").textContent = data.participants["Participant C"] || "-";
+      document.querySelector("#model-D").textContent = data.participants["Participant D"] || "-";
+    }
   } catch {
     statusEl.textContent = "サーバー確認失敗";
   }
 }
 
-async function callParticipant(endpoint) {
-  const res = await fetch(endpoint, {
+async function requestDecision(id) {
+  setParticipantState(id, "判断中…", "thinking");
+
+  const res = await fetch("/api/participant/decide", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ messages })
+    body: JSON.stringify({
+      participant: id,
+      messages,
+      budget: budgetFor(id)
+    })
   });
+
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Request failed");
-  messages.push({
-    participant: data.participant,
-    text: data.text || "(返答テキストなし)"
+  if (!res.ok) throw new Error(data.error || "Decision request failed");
+
+  const cost = Number(data.tokenCost) || 0;
+  stats[id].remaining -= cost;
+  stats[id].decisionTokens += cost;
+  stats[id].lastDecision = data.decision;
+
+  const d = data.decision || { action: "pass", urgency: 0, target: null, reason: "" };
+  if (d.action === "raise") {
+    stats[id].raised += 1;
+    setParticipantState(id, "挙手 " + Math.round(d.urgency), "raised");
+  } else {
+    stats[id].passed += 1;
+    setParticipantState(id, "見送り", "pass");
+  }
+
+  addObserverLog(
+    id + " → " + d.action +
+    " / urgency=" + Math.round(d.urgency || 0) +
+    (d.target ? " / target=" + d.target : "") +
+    " / 判断消費=" + cost +
+    (d.reason ? " / 理由: " + d.reason : "")
+  );
+
+  renderStats();
+  return { id, decision: d };
+}
+
+async function requestSpeech(id) {
+  setParticipantState(id, "発言中…", "speaking");
+
+  const res = await fetch("/api/participant/speak", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      participant: id,
+      messages,
+      budget: budgetFor(id)
+    })
   });
-  render();
-  return data;
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Speech request failed");
+
+  const cost = Number(data.tokenCost) || 0;
+  stats[id].remaining -= cost;
+  stats[id].speechTokens += cost;
+  stats[id].spoken += 1;
+
+  messages.push({
+    participant: id,
+    text: data.text || "(発言なし)"
+  });
+
+  addObserverLog(id + " 発言 / 発言消費=" + cost);
+  setParticipantState(id, stats[id].remaining > 0 ? "待機" : "予算終了", stats[id].remaining > 0 ? "" : "exhausted");
+
+  renderTranscript();
+  renderStats();
 }
 
-function usageText(openaiData, geminiData, claudeData) {
-  const o = openaiData?.usage;
-  const g = geminiData?.usage;
-  const d = claudeData?.usage;
-  const oText = o
-    ? `A: in ${o.input_tokens ?? "?"} / out ${o.output_tokens ?? "?"}`
-    : "A: -";
-  const gText = g
-    ? `C: in ${g.promptTokenCount ?? "?"} / out ${g.candidatesTokenCount ?? "?"}`
-    : "C: -";
-  const dText = d
-    ? `D: in ${d.input_tokens ?? "?"} / out ${d.output_tokens ?? "?"}`
-    : "D: -";
-  return `Token usage — ${oText} | ${gText} | ${dText}`;
+function chooseSpeaker(raisers) {
+  for (let offset = 0; offset < AI_IDS.length; offset += 1) {
+    const index = (fairIndex + offset) % AI_IDS.length;
+    const id = AI_IDS[index];
+    if (raisers.includes(id)) {
+      fairIndex = (index + 1) % AI_IDS.length;
+      return id;
+    }
+  }
+  return raisers[0] || null;
 }
 
-async function send() {
-  const text = inputEl.value.trim();
-  if (!text) return;
+function activeIds() {
+  return AI_IDS.filter((id) => stats[id].remaining > 0);
+}
 
-  messages.push({ participant: "Participant B", text });
-  inputEl.value = "";
-  render();
-
+async function runMeeting() {
+  if (running) return;
+  running = true;
+  humanWantsFloor = false;
+  aiChain = 0;
+  inputEl.disabled = true;
   sendEl.disabled = true;
-  let openaiData = null;
-  let geminiData = null;
-  let claudeData = null;
+  takeFloorEl.disabled = false;
+  takeFloorEl.textContent = "発言する（AIを止める）";
 
-  try {
-    sendEl.textContent = "Participant A が考えています…";
-    try {
-      openaiData = await callParticipant("/api/openai/respond");
-    } catch (error) {
-      addSystemError("Participant A", error);
+  while (true) {
+    if (humanWantsFloor) {
+      setHumanFloor(true, "あなたが発言権を取りました。AIは待機しています。");
+      return;
     }
 
-    sendEl.textContent = "Participant C が考えています…";
-    try {
-      geminiData = await callParticipant("/api/gemini/respond");
-    } catch (error) {
-      addSystemError("Participant C", error);
+    const active = activeIds();
+    if (active.length === 0) {
+      setHumanFloor(true, "AI全員の会議内予算が尽きました。");
+      return;
     }
 
-    sendEl.textContent = "Participant D が考えています…";
-    try {
-      claudeData = await callParticipant("/api/anthropic/respond");
-    } catch (error) {
-      addSystemError("Participant D", error);
+    meetingStateEl.textContent = "各AIが、今発言する価値があるか判断しています…";
+
+    const results = await Promise.all(active.map(async (id) => {
+      try {
+        return await requestDecision(id);
+      } catch (error) {
+        setParticipantState(id, "エラー", "error");
+        addObserverLog(id + " 判断エラー: " + error.message);
+        return { id, decision: { action: "pass", urgency: 0 } };
+      }
+    }));
+
+    if (humanWantsFloor) {
+      setHumanFloor(true, "あなたが発言権を取りました。判断処理までの使用量は消費されています。");
+      return;
     }
 
-    usageEl.textContent = usageText(openaiData, geminiData, claudeData);
-  } finally {
-    sendEl.disabled = false;
-    sendEl.textContent = "Participant B として発言";
-    inputEl.focus();
+    const raisers = results
+      .filter((r) => r.decision.action === "raise" && stats[r.id].remaining > 0)
+      .map((r) => r.id);
+
+    if (raisers.length === 0) {
+      setHumanFloor(true, "全AIが発言を見送りました。あなたの番です。");
+      return;
+    }
+
+    const speaker = chooseSpeaker(raisers);
+    meetingStateEl.textContent = speaker + " が挙手し、発言権を得ました。";
+
+    try {
+      await requestSpeech(speaker);
+    } catch (error) {
+      setParticipantState(speaker, "エラー", "error");
+      addObserverLog(speaker + " 発言エラー: " + error.message);
+    }
+
+    aiChain += 1;
+
+    if (humanWantsFloor) {
+      setHumanFloor(true, "現在のAI発言が終わったので停止しました。あなたの番です。");
+      return;
+    }
+
+    if (aiChain >= MAX_AI_CHAIN) {
+      setHumanFloor(true, "連続AI発言が " + MAX_AI_CHAIN + " 回に達したため、安全停止しました。");
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 350));
   }
 }
 
-sendEl.addEventListener("click", send);
+async function sendHumanMessage() {
+  const text = inputEl.value.trim();
+  if (!text || running) return;
+
+  messages.push({ participant: HUMAN_ID, text });
+  inputEl.value = "";
+  renderTranscript();
+
+  for (const id of AI_IDS) {
+    if (stats[id].remaining > 0) setParticipantState(id, "待機");
+  }
+
+  setHumanFloor(false, "あなたの発言を受けて会議を再開します。");
+  running = false;
+  await runMeeting();
+}
+
+takeFloorEl.addEventListener("click", () => {
+  if (!running) return;
+  humanWantsFloor = true;
+  takeFloorEl.disabled = true;
+  takeFloorEl.textContent = "停止予約済み";
+  meetingStateEl.textContent = "現在のAPI処理が終わった時点で、あなたに発言権を戻します。";
+});
+
+sendEl.addEventListener("click", sendHumanMessage);
 inputEl.addEventListener("keydown", (event) => {
-  if (event.ctrlKey && event.key === "Enter") send();
+  if (event.ctrlKey && event.key === "Enter") sendHumanMessage();
+});
+
+resetEl.addEventListener("click", () => {
+  location.reload();
 });
 
 health();
-render();
+renderTranscript();
+renderStats();
+setHumanFloor(true, "あなたが最初の発言権を持っています。");
