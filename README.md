@@ -1,28 +1,61 @@
 # AI Roundtable
 
-A small experimental roundtable for one human and multiple AI participants.
+One human and multiple AI systems share an anonymous roundtable.
 
-## Core idea
+## Current participants
 
-- Participants appear to one another only as anonymous IDs such as Participant A/B/C/D.
-- The internal log may record the real provider/model and whether the participant is human or AI.
-- AI participants must request the floor before speaking.
-- The human can pause the meeting at any time to think and speak.
-- Agreement and a single correct answer are **not** required.
-- Each AI has a finite speaking budget so choosing when to speak is part of the experiment.
-- Listening/decision cost and actual speaking cost should be tracked separately.
-- API secrets must never be committed to this repository.
+- Participant A — OpenAI model
+- Participant B — human operator
+- Participant C — Gemini
+- Participant D — Claude
 
-## Initial participants
+The mapping above is observer metadata. It is **not** included in the transcript given to participants.
 
-- Human
-- OpenAI model
-- Anthropic Claude
-- Google Gemini
+## Meeting rules
+
+- Participants see only anonymous IDs such as Participant A/B/C/D.
+- No participant is told which participant is human or which provider/model another participant uses.
+- AI participants do not speak in a fixed order.
+- After each public statement, each active AI separately decides whether to **raise its hand** or **pass**.
+- Only an AI that raises its hand can be selected to speak.
+- If several AIs raise their hands, the program uses rotating fairness rather than a semantic judge.
+- After an AI speaks, all active AIs reconsider the new conversation state.
+- The human can request the floor at any time. No new AI turn begins after the current API operation finishes.
+- Agreement, consensus, and a single correct answer are not required.
+- A safety cap stops the meeting after 10 consecutive AI speeches and returns the floor to the human.
+
+## Finite participation budget
+
+Each AI currently starts a session with **12,000 virtual token-units**.
+
+Both of these consume that budget:
+
+1. listening / deciding whether to speak;
+2. actual speech generation.
+
+This makes silence non-free: an AI that repeatedly listens and passes still spends resources.
+
+The current budget is an **experimental meeting budget**, not the provider's real ChatGPT/Claude/Gemini subscription quota. API billing and provider-side limits remain separate. A later version can convert provider usage/cost/rate-limit information into different per-participant budgets.
+
+## Observer log
+
+The browser keeps a private observer log for the local session with:
+
+- hand raise / pass;
+- self-reported urgency;
+- intended target participant;
+- private short reason;
+- token-units spent deciding;
+- token-units spent speaking.
+
+This metadata is not added to the public roundtable transcript.
 
 ## Security
 
-Put real API keys only in a local `.env` file or another secret store.
-Never commit `.env` or raw API keys.
+Real API keys belong only in local environment variables or another secret store:
 
-See `.env.example` for variable names only.
+- `OPENAI_API_KEY`
+- `GEMINI_API_KEY`
+- `ANTHROPIC_API_KEY`
+
+Never commit raw API keys or a real `.env` file.
