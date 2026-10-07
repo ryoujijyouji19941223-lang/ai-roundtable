@@ -35,6 +35,7 @@ let fairIndex = 0;
 let aiChain = 0;
 let lastAiSpeaker = null;
 let decisionRound = 0;
+let pendingHands = [];
 
 function shortId(id) {
   return id.replace("Participant ", "");
@@ -168,21 +169,70 @@ async function health() {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientError(status, message) {
+  const text = String(message || "").toLowerCase();
+  return [429, 500, 502, 503, 504].includes(Number(status)) ||
+    text.includes("high demand") ||
+    text.includes("temporar") ||
+    text.includes("try again later") ||
+    text.includes("unavailable") ||
+    text.includes("overloaded");
+}
+
+async function postParticipant(endpoint, payload, id, actionLabel, maxAttempts = 3) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json();
+      if (res.ok) return data;
+
+      const error = new Error(data.error || actionLabel + " request failed");
+      error.status = res.status;
+      throw error;
+    } catch (error) {
+      lastError = error;
+
+      if (!isTransientError(error.status, error.message) || attempt >= maxAttempts) {
+        throw error;
+      }
+
+      const waitMs = attempt === 1 ? 1500 : 3500;
+      setParticipantState(id, "一時混雑・再試行", "thinking");
+      addObserverLog(
+        id + " " + actionLabel + " 一時エラー: " + error.message +
+        " / " + waitMs + "ms後に再試行 (" + attempt + "/" + maxAttempts + ")"
+      );
+      await sleep(waitMs);
+    }
+  }
+
+  throw lastError || new Error(actionLabel + " request failed");
+}
+
 async function requestDecision(id) {
   setParticipantState(id, "判断中…", "thinking");
 
-  const res = await fetch("/api/participant/decide", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
+  const data = await postParticipant(
+    "/api/participant/decide",
+    {
       participant: id,
       messages,
       budget: budgetFor(id)
-    })
-  });
-
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Decision request failed");
+    },
+    id,
+    "判断"
+  );
 
   const cost = Number(data.tokenCost) || 0;
   const apiCost = data.apiCost || {};
@@ -218,18 +268,16 @@ async function requestDecision(id) {
 async function requestSpeech(id) {
   setParticipantState(id, "発言中…", "speaking");
 
-  const res = await fetch("/api/participant/speak", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
+  const data = await postParticipant(
+    "/api/participant/speak",
+    {
       participant: id,
       messages,
       budget: budgetFor(id)
-    })
-  });
-
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Speech request failed");
+    },
+    id,
+    "発言"
+  );
 
   const cost = Number(data.tokenCost) || 0;
   const apiCost = data.apiCost || {};
@@ -269,6 +317,37 @@ function chooseSpeaker(raisers) {
   return raisers[0] || null;
 }
 
+function enqueueRaisers(raisers) {
+  const remaining = [...new Set(raisers)].filter(
+    (id) => !pendingHands.includes(id) && stats[id].remaining > 0
+  );
+
+  while (remaining.length > 0) {
+    const next = chooseSpeaker(remaining);
+    if (!next) break;
+    pendingHands.push(next);
+    remaining.splice(remaining.indexOf(next), 1);
+  }
+
+  for (const id of pendingHands) {
+    if (stats[id].remaining > 0) {
+      setParticipantState(id, "挙手・発言待ち", "raised");
+    }
+  }
+
+  if (pendingHands.length > 0) {
+    addObserverLog("発言待ちキュー: " + pendingHands.join(" → "));
+  }
+}
+
+function nextQueuedSpeaker() {
+  while (pendingHands.length > 0) {
+    const id = pendingHands.shift();
+    if (stats[id]?.remaining > 0) return id;
+  }
+  return null;
+}
+
 function activeIds() {
   return AI_IDS.filter((id) => stats[id].remaining > 0);
 }
@@ -286,6 +365,7 @@ async function runMeeting() {
   running = true;
   humanWantsFloor = false;
   aiChain = 0;
+  pendingHands = [];
   inputEl.disabled = true;
   sendEl.disabled = true;
   takeFloorEl.disabled = false;
@@ -295,6 +375,39 @@ async function runMeeting() {
     if (humanWantsFloor) {
       setHumanFloor(true, "あなたが発言権を取りました。AIは待機しています。");
       return;
+    }
+
+    const queuedSpeaker = nextQueuedSpeaker();
+    if (queuedSpeaker) {
+      meetingStateEl.textContent =
+        queuedSpeaker + " は前の判断ラウンドで挙手済みです。発言待ちキューから発言します。";
+
+      let spokeSuccessfully = false;
+      try {
+        await requestSpeech(queuedSpeaker);
+        spokeSuccessfully = true;
+      } catch (error) {
+        setParticipantState(queuedSpeaker, "エラー", "error");
+        addObserverLog(queuedSpeaker + " 発言エラー: " + error.message);
+      }
+
+      if (spokeSuccessfully) lastAiSpeaker = queuedSpeaker;
+      aiChain += 1;
+
+      if (humanWantsFloor) {
+        pendingHands = [];
+        setHumanFloor(true, "現在のAI発言が終わったので停止しました。あなたの番です。");
+        return;
+      }
+
+      if (aiChain >= MAX_AI_CHAIN) {
+        pendingHands = [];
+        setHumanFloor(true, "連続AI発言が " + MAX_AI_CHAIN + " 回に達したため、安全停止しました。");
+        return;
+      }
+
+      await sleep(350);
+      continue;
     }
 
     const active = activeIds();
@@ -343,35 +456,15 @@ async function runMeeting() {
       return;
     }
 
-    const speaker = chooseSpeaker(raisers);
-    meetingStateEl.textContent = speaker + " が挙手し、発言権を得ました。";
+    enqueueRaisers(raisers);
 
-    let spokeSuccessfully = false;
-    try {
-      await requestSpeech(speaker);
-      spokeSuccessfully = true;
-    } catch (error) {
-      setParticipantState(speaker, "エラー", "error");
-      addObserverLog(speaker + " 発言エラー: " + error.message);
-    }
-
-    if (spokeSuccessfully) {
-      lastAiSpeaker = speaker;
-    }
-
-    aiChain += 1;
-
-    if (humanWantsFloor) {
-      setHumanFloor(true, "現在のAI発言が終わったので停止しました。あなたの番です。");
+    if (pendingHands.length === 0) {
+      setHumanFloor(true, "挙手はありましたが、発言可能なAIが残っていません。あなたの番です。");
       return;
     }
 
-    if (aiChain >= MAX_AI_CHAIN) {
-      setHumanFloor(true, "連続AI発言が " + MAX_AI_CHAIN + " 回に達したため、安全停止しました。");
-      return;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    // 次のループで、挙手した順番を保持したまま発言させる。
+    continue;
   }
 }
 
@@ -382,6 +475,7 @@ async function sendHumanMessage() {
   messages.push({ participant: HUMAN_ID, text });
   inputEl.value = "";
   lastAiSpeaker = null;
+  pendingHands = [];
   renderTranscript();
 
   for (const id of AI_IDS) {
