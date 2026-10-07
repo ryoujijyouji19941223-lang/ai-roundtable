@@ -33,6 +33,8 @@ let running = false;
 let humanWantsFloor = false;
 let fairIndex = 0;
 let aiChain = 0;
+let lastAiSpeaker = null;
+let decisionRound = 0;
 
 function shortId(id) {
   return id.replace("Participant ", "");
@@ -245,7 +247,9 @@ async function requestSpeech(id) {
   addObserverLog(
     id + " 発言 / 発言消費=" + cost +
     " / API=" + formatUsd(apiCost.minUsd) +
-    (Number(apiCost.maxUsd || 0) !== Number(apiCost.minUsd || 0) ? "～" + formatUsd(apiCost.maxUsd) : "")
+    (Number(apiCost.maxUsd || 0) !== Number(apiCost.minUsd || 0) ? "～" + formatUsd(apiCost.maxUsd) : "") +
+    (data.continued ? " / 出力上限の自動継続 " + data.continued + "回" : "") +
+    (data.truncatedAfterContinuation ? " / ※継続後も上限到達" : "")
   );
   setParticipantState(id, stats[id].remaining > 0 ? "待機" : "予算終了", stats[id].remaining > 0 ? "" : "exhausted");
 
@@ -267,6 +271,14 @@ function chooseSpeaker(raisers) {
 
 function activeIds() {
   return AI_IDS.filter((id) => stats[id].remaining > 0);
+}
+
+function eligibleIds() {
+  return activeIds().filter((id) => id !== lastAiSpeaker);
+}
+
+function lastPublicMessage() {
+  return messages[messages.length - 1] || null;
 }
 
 async function runMeeting() {
@@ -291,9 +303,23 @@ async function runMeeting() {
       return;
     }
 
-    meetingStateEl.textContent = "各AIが、今発言する価値があるか判断しています…";
+    const eligible = eligibleIds();
+    if (eligible.length === 0) {
+      setHumanFloor(true, "直前に発言したAI以外に発言可能なAIがいないため、あなたの番です。");
+      return;
+    }
 
-    const results = await Promise.all(active.map(async (id) => {
+    decisionRound += 1;
+    const trigger = lastPublicMessage();
+    addObserverLog(
+      "──── 判断ラウンド #" + decisionRound +
+      (trigger ? " / 直前=" + trigger.participant + "「" + String(trigger.text).slice(0, 80) + (String(trigger.text).length > 80 ? "…" : "") + "」" : "") +
+      " ────"
+    );
+
+    meetingStateEl.textContent = "直前の発言を受けて、発言する価値があるか各AIが判断しています…";
+
+    const results = await Promise.all(eligible.map(async (id) => {
       try {
         return await requestDecision(id);
       } catch (error) {
@@ -320,11 +346,17 @@ async function runMeeting() {
     const speaker = chooseSpeaker(raisers);
     meetingStateEl.textContent = speaker + " が挙手し、発言権を得ました。";
 
+    let spokeSuccessfully = false;
     try {
       await requestSpeech(speaker);
+      spokeSuccessfully = true;
     } catch (error) {
       setParticipantState(speaker, "エラー", "error");
       addObserverLog(speaker + " 発言エラー: " + error.message);
+    }
+
+    if (spokeSuccessfully) {
+      lastAiSpeaker = speaker;
     }
 
     aiChain += 1;
@@ -349,6 +381,7 @@ async function sendHumanMessage() {
 
   messages.push({ participant: HUMAN_ID, text });
   inputEl.value = "";
+  lastAiSpeaker = null;
   renderTranscript();
 
   for (const id of AI_IDS) {
