@@ -25,6 +25,7 @@ const stats = Object.fromEntries(AI_IDS.map((id) => [id, {
   speechUsdMax: 0,
   spoken: 0,
   passed: 0,
+  failed: 0,
   raised: 0,
   lastDecision: null
 }]));
@@ -110,7 +111,7 @@ function renderStats() {
       " / 発言 " + Math.round(s.speechTokens).toLocaleString();
 
     document.querySelector("#count-" + key).textContent =
-      "発言 " + s.spoken + "回 / 見送り " + s.passed + "回";
+      "発言 " + s.spoken + "回 / 見送り " + s.passed + "回 / 判断失敗 " + s.failed + "回";
 
     const minUsd = s.decisionUsdMin + s.speechUsdMin;
     const maxUsd = s.decisionUsdMax + s.speechUsdMax;
@@ -242,13 +243,16 @@ async function requestDecision(id) {
   stats[id].decisionUsdMax += Number(apiCost.maxUsd) || 0;
   stats[id].lastDecision = data.decision;
 
-  const d = data.decision || { action: "pass", urgency: 0, target: null, reason: "" };
+  const d = data.decision || { action: "error", urgency: 0, target: null, reason: "判断結果が返されませんでした。" };
   if (d.action === "raise") {
     stats[id].raised += 1;
     setParticipantState(id, "挙手 " + Math.round(d.urgency), "raised");
-  } else {
+  } else if (d.action === "pass") {
     stats[id].passed += 1;
     setParticipantState(id, "見送り", "pass");
+  } else {
+    stats[id].failed += 1;
+    setParticipantState(id, "判断失敗", "error");
   }
 
   addObserverLog(
@@ -256,6 +260,8 @@ async function requestDecision(id) {
     " / urgency=" + Math.round(d.urgency || 0) +
     (d.target ? " / target=" + d.target : "") +
     " / 判断消費=" + cost +
+    (data.retries ? " / 自動再試行=" + data.retries + "回" : "") +
+    (data.finishReason ? " / 終了理由=" + data.finishReason : "") +
     " / API=" + formatUsd(apiCost.minUsd) +
     (Number(apiCost.maxUsd || 0) !== Number(apiCost.minUsd || 0) ? "～" + formatUsd(apiCost.maxUsd) : "") +
     (d.reason ? " / 理由: " + d.reason : "")
@@ -438,7 +444,9 @@ async function runMeeting() {
       } catch (error) {
         setParticipantState(id, "エラー", "error");
         addObserverLog(id + " 判断エラー: " + error.message);
-        return { id, decision: { action: "pass", urgency: 0 } };
+        stats[id].failed += 1;
+        renderStats();
+        return { id, decision: { action: "error", urgency: 0 } };
       }
     }));
 
@@ -452,7 +460,13 @@ async function runMeeting() {
       .map((r) => r.id);
 
     if (raisers.length === 0) {
-      setHumanFloor(true, "全AIが発言を見送りました。あなたの番です。");
+      const failures = results.filter((r) => r.decision.action === "error");
+      setHumanFloor(
+        true,
+        failures.length
+          ? failures.length + "体が判断に失敗し、その他のAIは見送りました。あなたの番です。"
+          : "全AIが自分の判断で発言を見送りました。あなたの番です。"
+      );
       return;
     }
 
