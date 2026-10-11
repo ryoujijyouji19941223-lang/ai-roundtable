@@ -10,6 +10,20 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5-5";
 
 const DECISION_MAX_OUTPUT = 220;
+const GEMINI_DECISION_MAX_OUTPUT = 1024;
+const GEMINI_DECISION_RETRY_OUTPUT = 1536;
+
+const DECISION_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    action: { type: "string", enum: ["raise", "pass"] },
+    urgency: { type: "integer", minimum: 0, maximum: 100 },
+    target: { type: ["string", "null"] },
+    reason: { type: "string" }
+  },
+  required: ["action", "urgency", "target", "reason"],
+  additionalProperties: false
+};
 const SPEECH_MAX_OUTPUT = 1800;
 const CONTINUATION_MAX_OUTPUT = 1200;
 const MAX_CONTINUATIONS = 2;
@@ -249,11 +263,14 @@ function parseDecision(text) {
     .trim();
   const match = cleaned.match(/\{[\s\S]*\}/);
   if (!match) {
-    return { action: "pass", urgency: 0, target: null, reason: "Unparseable decision output." };
+    return { action: "error", urgency: 0, target: null, reason: "判断出力が空か、JSON形式ではありません。" };
   }
   try {
     const raw = JSON.parse(match[0]);
-    const action = String(raw.action || "").toLowerCase() === "raise" ? "raise" : "pass";
+    const action = String(raw.action || "").toLowerCase();
+    if (action !== "raise" && action !== "pass") {
+      return { action: "error", urgency: 0, target: null, reason: "判断結果のaction値が不正です。" };
+    }
     const urgency = Math.max(0, Math.min(100, Number(raw.urgency) || 0));
     const target = typeof raw.target === "string" && /^Participant [ABCD]$/.test(raw.target)
       ? raw.target
@@ -261,7 +278,7 @@ function parseDecision(text) {
     const reason = String(raw.reason || "").slice(0, 240);
     return { action, urgency, target, reason };
   } catch {
-    return { action: "pass", urgency: 0, target: null, reason: "Decision JSON parse failed." };
+    return { action: "error", urgency: 0, target: null, reason: "判断用JSONの解析に失敗しました。" };
   }
 }
 
@@ -300,7 +317,7 @@ async function callOpenAI(instructions, prompt, maxOutputTokens, effort = "low")
   };
 }
 
-async function callGemini(instructions, prompt, maxOutputTokens) {
+async function callGemini(instructions, prompt, maxOutputTokens, mode = "speak") {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is not available to this process.");
 
@@ -316,7 +333,18 @@ async function callGemini(instructions, prompt, maxOutputTokens) {
     body: JSON.stringify({
       system_instruction: { parts: [{ text: instructions }] },
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { maxOutputTokens }
+      generationConfig: mode === "decide"
+        ? {
+            maxOutputTokens,
+            thinkingConfig: { thinkingLevel: "minimal" },
+            responseFormat: {
+              text: {
+                mimeType: "application/json",
+                schema: DECISION_JSON_SCHEMA
+              }
+            }
+          }
+        : { maxOutputTokens }
     })
   });
 
@@ -331,6 +359,7 @@ async function callGemini(instructions, prompt, maxOutputTokens) {
     text: extractGeminiText(data),
     usage: data.usageMetadata || null,
     model: GEMINI_MODEL,
+    finishReason: data?.candidates?.[0]?.finishReason || "UNKNOWN",
     truncated: data?.candidates?.[0]?.finishReason === "MAX_TOKENS"
   };
 }
@@ -374,7 +403,7 @@ async function callProvider(config, instructions, prompt, maxOutput, mode) {
   if (config.provider === "openai") {
     return callOpenAI(instructions, prompt, maxOutput, mode === "decide" ? "none" : "low");
   }
-  if (config.provider === "gemini") return callGemini(instructions, prompt, maxOutput);
+  if (config.provider === "gemini") return callGemini(instructions, prompt, maxOutput, mode);
   if (config.provider === "claude") return callClaude(instructions, prompt, maxOutput);
   throw new Error("Unsupported provider.");
 }
@@ -390,23 +419,63 @@ async function callParticipant(participantId, mode, transcript, budget) {
   const instructions = commonInstructions(participantId, budget);
 
   if (mode === "decide") {
-    const result = await callProvider(
+    const prompt = decisionPrompt(participantId, transcript);
+    const first = await callProvider(
       config,
       instructions,
-      decisionPrompt(participantId, transcript),
-      DECISION_MAX_OUTPUT,
+      prompt,
+      config.provider === "gemini" ? GEMINI_DECISION_MAX_OUTPUT : DECISION_MAX_OUTPUT,
       "decide"
     );
-    const cost = tokenCost(config.provider, result.usage);
-    const apiCost = estimateApiCost(config.provider, result.usage);
+
+    let last = first;
+    let decision = parseDecision(first.text);
+    let cost = tokenCost(config.provider, first.usage);
+    const apiCost = addCost(
+      { usd: 0, minUsd: 0, maxUsd: 0, pricingMode: "aggregate", breakdown: {} },
+      estimateApiCost(config.provider, first.usage)
+    );
+    let retries = 0;
+
+    // 形式上の失敗は「黙る意思」ではない。Geminiだけ最大1回再試行する。
+    if (config.provider === "gemini" && decision.action === "error") {
+      retries = 1;
+      try {
+        const second = await callProvider(
+          config,
+          instructions,
+          prompt,
+          GEMINI_DECISION_RETRY_OUTPUT,
+          "decide"
+        );
+        cost += tokenCost(config.provider, second.usage);
+        addCost(apiCost, estimateApiCost(config.provider, second.usage));
+        last = second;
+        decision = parseDecision(second.text);
+      } catch (error) {
+        decision = {
+          action: "error",
+          urgency: 0,
+          target: null,
+          reason: "再試行エラー: " + String(error.message || "").slice(0, 160)
+        };
+      }
+    }
+
+    if (decision.action === "error") {
+      decision.reason += " / finishReason=" + (last.finishReason || "不明") +
+        (last.truncated ? "（出力上限）" : "");
+    }
 
     return {
       participant: participantId,
-      decision: parseDecision(result.text),
+      decision,
       tokenCost: cost,
       apiCost,
-      usage: result.usage,
-      model: result.model
+      usage: last.usage,
+      model: last.model,
+      retries,
+      finishReason: last.finishReason || null
     };
   }
 
