@@ -337,12 +337,11 @@ async function callGemini(instructions, prompt, maxOutputTokens, mode = "speak")
         ? {
             maxOutputTokens,
             thinkingConfig: { thinkingLevel: "minimal" },
-            responseFormat: {
-              text: {
-                mimeType: "application/json",
-                schema: DECISION_JSON_SCHEMA
-              }
-            }
+            // generateContent uses a string MIME type here. The nested
+            // responseFormat.text.mimeType is a different enum type and
+            // rejects "application/json" on this endpoint.
+            responseMimeType: "application/json",
+            responseJsonSchema: DECISION_JSON_SCHEMA
           }
         : { maxOutputTokens }
     })
